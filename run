@@ -319,43 +319,45 @@ Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://vcr
 if (Test-Path -PathType Container "$env:temp\VcRedist") {
 	Remove-Item -Path "$env:temp\VcRedist" -Force -Recurse -ErrorAction SilentlyContinue
 }
-
+Wrun("Descargando archivos necesarios. Espere...")
 Get-7zip
 Get-aria2
 ###############################################
 #         COREL DRAW INSTALLATION CODE        #
 ###############################################
-Wrun("Descargando archivos necesarios. Espere...")
-
+Wrun("Obteniendo el lanzador. Espera...")
 & "$aria2Folder\aria2c" -x6 --allow-overwrite=true --connect-timeout=5 --timeout=5 --max-tries=1 $downloads.Launcher.url -o $downloads.Launcher.filename
+
+Wrun("Obteniendo el Instalador del programa. Espera...")
 & "$aria2Folder\aria2c" -x6 --allow-overwrite=true --connect-timeout=5 --timeout=5 --max-tries=1 $downloads.iso.url -o $downloads.iso.filename
 
 
 if (Test-Path -PathType Container "$downloads.extract") {
-	Remove-Item -Path "$downloads.extract" -Force -Recurse -ErrorAction SilentlyContinue
+	Remove-Item -Path "$($downloads.extract)" -Force -Recurse -ErrorAction SilentlyContinue
 }
 
-mkdir "$downloads.extract" | Out-Null
-
+mkdir "$($downloads.extract)" | Out-Null
 
 Wrun("Extrayendo archivos. Espere...")
 Invoke-Expression ("$7zipFolder\7z.exe x -tiso '$PSScriptroot\" + $downloads.iso.filename + "' -o'" + $downloads.extract + "' -aoa -y")
 Invoke-Expression ("$7zipFolder\7z.exe x '" + $downloads.launcher.filename + "' -o'" + $downloads.extract + "' -aoa -y -p" + $pass)
-Invoke-Expression ("$($downloads.extract)\$($downloads.launcher.command)")
-Wrun("Extrayendo archivos. Espere...")
-Invoke-Expression ("$7zipFolder\7z.exe x -tiso '$PSScriptroot\" + $downloads.iso.filename + "' -o'" + $downloads.extract + "' -aoa -y")
-Invoke-Expression ("$7zipFolder\7z.exe x '" + $downloads.launcher.filename + "' -o'" + $downloads.extract + "' -aoa -y -p$pass")
-Invoke-Expression ("$($downloads.extract)\$($downloads.launcher.command)")
+
+Wrun('Inicializando la instalación')
+$command = "$($downloads.extract)\$($downloads.launcher.command)"
+& cmd /c start /wait $command
 
 #Clean downloaded apps an files
 Wrun('Limpiando')
 Remove-Item -Force -Recurse "$7zipFolder"
 Remove-Item -Force -Recurse "$aria2Folder"
-Remove-Item -Force -Recurse "$($downloads.extract)"
 Remove-Item -Force -Recurse "$PSCommandPath"
+
 #######################################################
 #         INSERT CLEAN PROGRAM TEMPORARY FILES        #
 #######################################################
+Remove-Item -Force -Recurse "$($downloads.extract)"
+Remove-Item -Force -Recurse "$($downloads.Launcher.filename)"
+Remove-Item -Force -Recurse "$($downloads.iso.filename)"
 
 #Scrtip execution parameter pause
 if (-not $pause) {
