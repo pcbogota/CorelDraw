@@ -1,1 +1,366 @@
-Write-host "Welcome :)"
+param($p1)
+$Pause = $true
+if ($PSBoundParameters['p1'] -eq "Nopause") {
+	$Pause = $false
+}
+
+<###########################
+#                          #
+#    REQUIRED FUNCTIONS    #
+#                          #
+###########################>
+function add_spaces {
+	param(
+		[int]$width
+	)
+	$spaces = ""
+	For ($i = 0; $i -le $width; $i++) {
+		$spaces = $spaces + " "
+	}
+	return $spaces
+}
+
+function Get-7zip {
+	#Get msiless to extract files in .msi container
+	$url = "https://api.github.com/repos/activescott/lessmsi/releases/latest"
+	$url = (((Invoke-WebRequest -Uri $url).Content | ConvertFrom-Json).assets | Where-Object { $_.label -like "*binarie*" }).browser_download_url
+	$lessmsiFile = $url | Split-Path -Leaf
+	$lessmsiFolder = "$PSScriptRoot\" + [System.IO.Path]::GetFileNameWithoutExtension($lessmsiFile)
+	if (Test-Path -Path $lessmsiFolder -PathType Container) {
+		Remove-Item $lessmsiFolder -Recurse -Force
+	}
+	Invoke-WebRequest -Uri $url -OutFile "$PSScriptRoot\$lessmsiFile"
+	Expand-Archive "$PSScriptRoot\$lessmsiFile" -DestinationPath $lessmsiFolder
+	Remove-Item "$PSScriptRoot\$lessmsiFile" -Force
+
+	#Get 7-zip msi file
+	wRun("`n`n`n`n`n`n`nObteniendo 7-zip...")
+	$url = "https://api.github.com/repos/ip7z/7zip/releases/latest"
+	$urls = (((Invoke-WebRequest -Uri $url).Content | ConvertFrom-Json).assets | Where-Object { $_.name -like "*.msi" }).browser_download_url
+	if (Test-Path -Path $7zipFolder -PathType Container) {
+		Remove-Item $7zipFolder -Recurse -Force
+	}
+	mkdir $7zipFolder | Out-Null
+	$url = $urls | ForEach-Object {
+		if ($os.x64 -and $_ -like "*x64*") {
+			$_
+		}
+		if ($os.x86 -and $_ -notlike "*x64*") {
+			$_
+		}
+	}
+	$msifile = $url | Split-Path -Leaf
+	Invoke-WebRequest -Uri $url -OutFile "$7zipFolder\$msifile"
+	#extracting .msi
+	& $lessmsiFolder\lessmsi.exe x "$7zipFolder\$msifile" | Out-Null
+
+	#remove not used folder and / or files (msiless, 7zip.msi, 7zip extract files)
+	$msiextractFolder = "$PSScriptRoot\" + [System.IO.Path]::GetFileNameWithoutExtension($msifile)
+	Get-ChildItem -Path "$msiextractFolder" -Recurse -Include *.dll, *.exe | Move-Item -Destination "$7zipFolder"
+	Remove-Item "$7zipFolder\$msifile" -Recurse -Force
+	Remove-Item "$msiextractFolder" -Recurse -Force
+	Remove-Item "$lessmsiFolder" -Recurse -Force
+}
+
+function Get-aria2 {
+	$url = "https://api.github.com/repos/aria2/aria2/releases/latest"
+	$release = if ($os.x86) { "*32bit*" } else { "*64bit*" }
+	$url = (((Invoke-WebRequest -Uri $url).Content | ConvertFrom-Json).assets | Where-Object { $_.name -Like "*win*" -and $_.name -Like $release }).browser_download_url
+	wRun("`n`n`n`nObteniendo Aria2...")
+	if (Test-Path -Path $aria2Folder -PathType Container) {
+		Remove-Item $aria2Folder -Recurse -Force
+	}
+
+	mkdir $aria2Folder | Out-Null
+	$file = $url | Split-Path -Leaf
+	Invoke-WebRequest -Uri $url -OutFile "$aria2Folder\$file"
+	& ("$7zipFolder\7z.exe") e "$aria2Folder\$file" -y -aoa -o"$aria2Folder" *.exe -r | Out-Null
+	Remove-Item "$aria2Folder\$file" -Force
+}
+function Get-ElevatedPrivileges {
+	<#
+	.SYNOPSIS
+		Eleva los privilegios de ejecución del script
+
+	.DESCRIPTION
+		realiza la ejecución del script con privilegios de administrador
+
+	.PARAMETER Privilege
+		Tipo de privilegio que se asignará al script. 'SeTakeOwnershipPrivilege' es el mas alto
+
+	#>
+	param($Privilege)
+	$Definition = @"
+    using System;
+    using System.Runtime.InteropServices;
+
+    public class AdjPriv {
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+            internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr rele);
+
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+            internal static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+            internal static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+            internal struct TokPriv1Luid {
+                public int Count;
+                public long Luid;
+                public int Attr;
+            }
+
+        internal const int SE_PRIVILEGE_ENABLED = 0x00000002;
+        internal const int TOKEN_QUERY = 0x00000008;
+        internal const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+
+        public static bool EnablePrivilege(long processHandle, string privilege) {
+            bool retVal;
+            TokPriv1Luid tp;
+            IntPtr hproc = new IntPtr(processHandle);
+            IntPtr htok = IntPtr.Zero;
+            retVal = OpenProcessToken(hproc, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref htok);
+            tp.Count = 1;
+            tp.Luid = 0;
+            tp.Attr = SE_PRIVILEGE_ENABLED;
+            retVal = LookupPrivilegeValue(null, privilege, ref tp.Luid);
+            retVal = AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+            return retVal;
+        }
+    }
+"@
+	$ProcessHandle = (Get-Process -Id $pid).Handle
+	$type = Add-Type $definition -PassThru
+	$type[0]::EnablePrivilege($processHandle, $Privilege)
+}
+
+function Get-StringHash {
+	Param(
+		[Parameter(Mandatory = $true, Position = 0, HelpMessage = "Text to hash")]
+		[string]$text
+	)
+	$stringAsStream = [System.IO.MemoryStream]::new()
+	$writer = [System.IO.StreamWriter]::new($stringAsStream)
+	$writer.write($text)
+	$writer.Flush()
+	$stringAsStream.Position = 0
+	$hash = Get-FileHash -InputStream $stringAsStream | Select-Object Hash
+	return $hash.Hash
+}
+
+Function Pause ($Message = "Presione una tecla para continuar") {
+	# Check if running in PowerShell ISE
+	If ($psISE) {
+		# "ReadKey" not supported in PowerShell ISE.
+		# Show MessageBox UI
+		$Shell = New-Object -ComObject "WScript.Shell"
+		$Shell.Popup($Message + "`nPresone OK para continuar.", 0, "Pausa", 0)
+		Return
+	}
+
+	$Ignore =
+	16, # Shift (left or right)
+	17, # Ctrl (left or right)
+	18, # Alt (left or right)
+	20, # Caps lock
+	91, # Windows key (left)
+	92, # Windows key (right)
+	93, # Menu key
+	144, # Num lock
+	145, # Scroll lock
+	166, # Back
+	167, # Forward
+	168, # Refresh
+	169, # Stop
+	170, # Search
+	171, # Favorites
+	172, # Start/Home
+	173, # Mute
+	174, # Volume Down
+	175, # Volume Up
+	176, # Next Track
+	177, # Previous Track
+	178, # Stop Media
+	179, # Play
+	180, # Mail
+	181, # Select Media
+	182, # Application 1
+	183  # Application 2
+
+	Write-Host -NoNewline $Message
+	While ($Null -Eq $KeyInfo.VirtualKeyCode -Or $Ignore -Contains $KeyInfo.VirtualKeyCode) {
+		$KeyInfo = $Host.UI.RawUI.ReadKey("NoEcho, IncludeKeyDown")
+	}
+}
+
+function Get-Platform() {
+	$osName = (Get-WmiObject win32_operatingsystem).name
+	$platform = [PSCustomObject]@{
+		w10 = $osName -match "10"
+		w11 = $osName -match "11"
+		x86 = $env:PROCESSOR_ARCHITECTURE -eq "x86"
+		x64 = $env:PROCESSOR_ARCHITECTURE -eq "AMD64"
+	}
+	return $platform
+
+}
+
+function wError {
+	param(
+		[string]$Text
+	)
+	$finalText = ''
+	$width = 86
+
+	$TextArray = $Text.Split("`n")
+	foreach ($line in $TextArray) {
+		$line = $line.Trim()
+
+		if ($line.Length -eq 0) {
+			$spaces = add_spaces($width)
+			$finalText = $finalText + $spaces + "`n"
+		} else {
+			$sangria = [int]((($width - ($line.Length) ) / 2) - 1)
+			$spaces = add_spaces($sangria)
+			$thisLine = $spaces + $line + $spaces
+			if ($thisLine.Length -lt ($width + 1)) {
+				$spaces = add_spaces($width - $thisLine.Length)
+				$thisLine = $thisLine + $spaces
+			}
+			$finalText = $finalText + $thisLine + "`n"
+		}
+	}
+	$blackLine = add_spaces($width)
+	Write-Host -ForegroundColor red -BackgroundColor Black $blackLine
+	Write-Host -ForegroundColor red -BackgroundColor Black $finalText.TrimEnd("`n")
+	Write-Host -ForegroundColor red -BackgroundColor Black $blackLine
+	Write-Host ""
+}
+
+function wOk {
+	param(
+		[string]$Text
+	)
+	Write-Host -ForegroundColor Green $Text
+	Write-Host ""
+}
+
+function wRun {
+	param(
+		[string]$Text
+	)
+	Write-Host -ForegroundColor Yellow $Text
+	Write-Host ""
+}
+
+<####################################
+#####################################
+#         Variable Asignment        #
+#####################################
+####################################>
+
+$global:os = Get-Platform
+$global:pass = "snooped"
+$global:passHash = "270A12BA66AC23907CD5ADFA1C321C058254C8189843316CC210A1C9ADA36E07"
+$global:7zipFolder = "$PSScriptRoot\7zip_latest"
+$global:aria2Folder = "$PSScriptRoot\aria2_latest"
+$downloads = @{
+	iso      = @{
+		url      = 'https://www.corel.com/akdlm/6763/downloads/ELD/CDGS/2024/JwdAS58QP32/CorelDRAWGraphicsSuite2024Installer_MF01.iso'
+		filename = "CD2024.iso"
+	}
+	launcher = @{
+		url      = 'https://pcbogota.github.io/CorelDraw/CDGS2024-v25.0.0.230_MF01-_-Patch_snooped.7z'
+		filename = "launcher.7z"
+		command  = 'install_error.cmd'
+	}
+	extract  = "$PSScriptRoot\CD2024"
+}
+
+
+<#########################
+#                        #
+#    SCRIPT EXECUTION    #
+#                        #
+#########################>
+Clear-Host
+
+#Bypass Script restrictions
+Set-ExecutionPolicy Bypass -Scope Process -Force
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+
+#Starting with elevated privileges
+if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+	Write-Host "Elevando privilegios..."
+	Write-Host $PSCommandPath
+	Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+	exit
+}
+do {} until (Get-ElevatedPrivileges SeTakeOwnershipPrivilege)
+
+while ($passHash -ne 'ok') {
+	$global:pass = Read-Host 'Ingresa la contraseña de ejecución' -AsSecureString
+	$StringHash = Get-StringHash([Runtime.InteropServices.Marshal]::PtrToStringAuto(
+			[Runtime.InteropServices.Marshal]::SecureStringToBSTR($global:pass)
+		))
+	if ($global:passHash -eq $StringHash) {
+		wOk("Se ha aceptado la contraseña.")
+		$passHash = 'ok'
+		$global:pass = (New-Object PSCredential 0, $pass).GetNetworkCredential().Password
+	} else {
+		wError("Contraseña incorrecta")
+	}
+}
+
+Set-Location $PSScriptRoot
+Wrun("Actualizando Visual C++ Redist. Espere...")
+Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://vcredist.com/install.ps1')) | Out-Host
+if (Test-Path -PathType Container "$env:temp\VcRedist") {
+	Remove-Item -Path "$env:temp\VcRedist" -Force -Recurse -ErrorAction SilentlyContinue
+}
+
+Get-7zip
+Get-aria2
+###############################################
+#         COREL DRAW INSTALLATION CODE        #
+###############################################
+Wrun("Descargando archivos necesarios. Espere...")
+
+& "$aria2Folder\aria2c" -x6 --allow-overwrite=true --connect-timeout=5 --timeout=5 --max-tries=1 $downloads.Launcher.url -o $downloads.Launcher.filename
+& "$aria2Folder\aria2c" -x6 --allow-overwrite=true --connect-timeout=5 --timeout=5 --max-tries=1 $downloads.iso.url -o $downloads.iso.filename
+
+
+if (Test-Path -PathType Container "$downloads.extract") {
+	Remove-Item -Path "$downloads.extract" -Force -Recurse -ErrorAction SilentlyContinue
+}
+
+mkdir "$downloads.extract" | Out-Null
+
+
+Wrun("Extrayendo archivos. Espere...")
+Invoke-Expression ("$7zipFolder\7z.exe x -tiso '$PSScriptroot\" + $downloads.iso.filename + "' -o'" + $downloads.extract + "' -aoa -y")
+Invoke-Expression ("$7zipFolder\7z.exe x '" + $downloads.launcher.filename + "' -o'" + $downloads.extract + "' -aoa -y -p" + $pass)
+Invoke-Expression ("$($downloads.extract)\$($downloads.launcher.command)")
+Wrun("Extrayendo archivos. Espere...")
+Invoke-Expression ("$7zipFolder\7z.exe x -tiso '$PSScriptroot\" + $downloads.iso.filename + "' -o'" + $downloads.extract + "' -aoa -y")
+Invoke-Expression ("$7zipFolder\7z.exe x '" + $downloads.launcher.filename + "' -o'" + $downloads.extract + "' -aoa -y -p$pass")
+Invoke-Expression ("$($downloads.extract)\$($downloads.launcher.command)")
+
+#Clean downloaded apps an files
+Wrun('Limpiando')
+Remove-Item -Force -Recurse "$7zipFolder"
+Remove-Item -Force -Recurse "$aria2Folder"
+Remove-Item -Force -Recurse "$($downloads.extract)"
+Remove-Item -Force -Recurse "$PSCommandPath"
+#######################################################
+#         INSERT CLEAN PROGRAM TEMPORARY FILES        #
+#######################################################
+
+#Scrtip execution parameter pause
+if (-not $pause) {
+	wOk("Terminado...")
+} else {
+	wOk("Terminado todo el proceso`nPuedes cerrar esta ventana!")
+	Pause("Presiona una tecla para cerrar`n")
+}
